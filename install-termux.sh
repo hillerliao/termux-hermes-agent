@@ -88,24 +88,39 @@ EOF
 clone_repo() {
     if [ -d "$HERMES_DIR/.git" ]; then
         info "仓库已存在，拉取最新代码..."
-        cd "$HERMES_DIR"
-        git pull --ff-only || warn "git pull 失败，使用现有代码继续"
+        git -C "$HERMES_DIR" pull --ff-only || warn "git pull 失败，使用现有代码继续"
     else
-        info "克隆 Hermes Agent 仓库..."
-        git clone "$REPO_URL" "$HERMES_DIR"
+        # GitHub 直连 + 两个国内镜像，自动 fallback
+        local mirrors=(
+            "$REPO_URL"
+            "https://ghproxy.cn/https://github.com/nousresearch/hermes-agent.git"
+            "https://mirror.ghproxy.com/https://github.com/nousresearch/hermes-agent.git"
+        )
+        local cloned=false
+        for mirror in "${mirrors[@]}"; do
+            info "尝试克隆: $mirror"
+            if git clone --depth 1 "$mirror" "$HERMES_DIR" 2>/dev/null; then
+                cloned=true
+                break
+            else
+                warn "克隆失败，尝试下一个镜像..."
+                rm -rf "$HERMES_DIR"
+            fi
+        done
+        if [ "$cloned" = false ]; then
+            fail "所有镜像均克隆失败，请检查网络后重试"
+        fi
     fi
-    cd "$HERMES_DIR"
     ok "代码就绪: $HERMES_DIR"
 }
 
 # ---- 安装 Python 依赖 ----
 install_python_deps() {
     info "安装 Hermes Agent 核心依赖（从源码编译，约 10-20 分钟）..."
-    cd "$HERMES_DIR"
 
     # tee 实时输出，pipefail 捕获 pip 失败
     set -o pipefail
-    pip install -e . \
+    pip install -e "$HERMES_DIR" \
         --index-url "$PIP_MIRROR" \
         --trusted-host "$PIP_TRUST" 2>&1 | tee ~/pip-install.log || {
         echo ""
@@ -129,7 +144,7 @@ install_optional_deps() {
 
     for extra in "${cn_extras[@]}"; do
         info "  安装 [$extra]..."
-        if pip install -e ".[$extra]" \
+        if pip install -e "$HERMES_DIR[$extra]" \
             --index-url "$PIP_MIRROR" \
             --trusted-host "$PIP_TRUST"; then
             ok "  [$extra] 安装成功"
@@ -145,7 +160,7 @@ install_optional_deps() {
         y|Y)
             for extra in "${slow_extras[@]}"; do
                 info "  安装 [$extra]（编译较慢，请耐心等待）..."
-                if pip install -e ".[$extra]" \
+                if pip install -e "$HERMES_DIR[$extra]" \
                     --index-url "$PIP_MIRROR" \
                     --trusted-host "$PIP_TRUST"; then
                     ok "  [$extra] 安装成功"
