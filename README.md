@@ -4,7 +4,9 @@
 
 ## 特性
 
-- **一键安装** — 自动安装系统依赖、克隆仓库、编译 Python/Rust 扩展
+- **一键安装** — 自动处理 Rust 扩展编译失败问题
+- **预编译 wheel** — pydantic-core / cryptography 使用 tpypi 预编译 wheel
+- **兼容桩** — jiter / rpds-py 自动创建纯 Python 兼容桩
 - **国内加速** — pip 清华镜像源 + GitHub 镜像自动 fallback
 - **智能检测** — 自动获取 Android API Level，自动修复 proot 入口劫持
 - **可选依赖** — 交互式选择安装飞书/钉钉/MCP/Telegram 等集成
@@ -28,11 +30,24 @@ curl -O https://raw.githubusercontent.com/hillerliao/termux-hermes-agent/main/in
 bash install-termux.sh
 ```
 
-安装过程约 15-30 分钟，主要耗时在 Rust/C 扩展编译。
+安装过程约 5-15 分钟（使用预编译 wheel 后大幅缩短）。
 
 ### 手动安装
 
 详见 [install-guide.md](install-guide.md)，包含逐步操作说明和踩坑记录。
+
+## Rust 扩展兼容方案
+
+Termux 的 Rust 工具链缺少标准库 rlib 文件，导致所有 Rust 扩展包编译失败。本脚本的解决方案：
+
+| 包名 | 方案 | 说明 |
+|------|------|------|
+| `pydantic-core` | tpypi 预编译 wheel | cp313, android_24_arm64 |
+| `cryptography` | tpypi 预编译 wheel | cp313-abi3 |
+| `jiter` | 纯 Python 兼容桩 | 包装 json.loads/dumps |
+| `rpds-py` | 纯 Python 兼容桩 | 包装 dict/frozenset |
+
+兼容桩通过创建 dist-info 目录注册为已安装包，确保 pip 依赖解析正常通过。
 
 ## 安装后配置
 
@@ -64,7 +79,7 @@ hermes
 
 ## 已知限制
 
-- **Rust 扩展编译可能失败** — `jiter`/`pydantic-core`/`cryptography` 在部分设备上编译失败（缺少 Rust stdlib rlib），脚本已自动配置预编译 wheel 源和 jiter 兼容桩
+- **jiter/rpds-py 使用纯 Python 桩** — 性能略低于 Rust 原生版，不影响日常使用
 - **voice 功能不可用** — `faster-whisper` 依赖 C++ 库，ARM 上极难构建
 - **不要使用官方 install.sh** — 它需要 `sudo`，Termux 没有
 - **确保 ANDROID_API_LEVEL 已设置** — 否则 maturin/Rust 构建会报错
@@ -77,6 +92,7 @@ hermes
 | RAM | 4GB（推荐开启 Swap） |
 | 磁盘 | 核心安装 ~1GB，含可选依赖 ~1.5-2GB |
 | Android | API 21+（5.0+） |
+| Python | 3.11+（推荐 3.13） |
 | Termux | 从 F-Droid 安装 |
 
 ## 文件说明
@@ -84,7 +100,7 @@ hermes
 ```
 .
 ├── README.md            # 项目说明
-├── install-termux.sh    # 一键安装脚本
+├── install-termux.sh    # 一键安装脚本（v0.10.0）
 ├── install-guide.md     # 详细安装指南（含踩坑记录）
 └── LICENSE              # MIT License
 ```
@@ -93,6 +109,8 @@ hermes
 
 - [Hermes Agent](https://github.com/nousresearch/hermes-agent) — 原始项目
 - [Termux](https://termux.dev/) — Android 终端模拟器
+- [termux-pip](https://pypi.org/project/termux-pip/) — Termux 预编译 wheel 配置工具
+- [tpypi (loamfy)](https://tpypi.loamfy-tools.workers.dev) — Termux Python 预编译 wheel 源
 
 ## License
 

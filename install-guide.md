@@ -1,7 +1,7 @@
 # Hermes Agent 在 Termux 上的安装指南
 
-> 经过真机实测验证（Android 12, aarch64, Termux）
-> 日期：2026-04-23（更新 Rust 编译问题解决方案）
+> 经过真机实测验证（Android 12, aarch64, Termux, Python 3.13）
+> 日期：2026-04-23（更新 Rust 编译问题完整解决方案）
 
 ## 环境信息
 
@@ -9,6 +9,22 @@
 - **系统**: Termux (非 proot-distro Ubuntu)
 - **Android API Level**: 35 (Android 12)
 - **Hermes Agent 版本**: v0.10.0
+- **Python**: 3.13.x
+
+---
+
+## 核心挑战：Rust 扩展包编译失败
+
+Hermes Agent v0.10.0 的依赖链中有 3 个 Rust 扩展包在 Termux 上**无法编译**：
+
+| 包名 | 用途 | 预编译 wheel | 解决方案 |
+|------|------|-------------|---------|
+| `jiter` | JSON 解析 (openai/anthropic 依赖) | ❌ 无 | 纯 Python 兼容桩 |
+| `rpds-py` | 不可变数据结构 (jsonschema 依赖) | ❌ 无 | 纯 Python 兼容桩 |
+| `pydantic-core` | 数据验证核心 | ✅ tpypi 有 | 预编译 wheel |
+| `cryptography` | 加密 (PyJWT 依赖) | ✅ tpypi 有 | 预编译 wheel |
+
+**编译失败原因**: Termux 的 Rust 工具链缺少标准库 rlib 文件，所有 maturin 构建都会报错：`crate 'std' required to be available in rlib format`
 
 ---
 
@@ -17,23 +33,13 @@
 ```bash
 pkg update && pkg upgrade
 
-# 编译工具链（C/Rust 扩展必需）
-pkg install build-essential clang cmake rust python nodejs git
-
-# cryptography 等包编译需要
-pkg install openssl libffi libsqlite
+pkg install build-essential clang cmake rust python nodejs git openssl libffi libsqlite
 ```
 
-## 第二步：设置关键环境变量
-
-**这是必须的！** 否则 `jiter` 等 Rust 编写的包（maturin 构建）会报错：
-`Failed to determine Android API level. Please set the ANDROID_API_LEVEL environment variable.`
+## 第二步：设置 ANDROID_API_LEVEL
 
 ```bash
-# 查看你的 Android API Level
-getprop ro.build.version.sdk
-
-# 写入 bashrc 持久化
+export ANDROID_API_LEVEL=$(getprop ro.build.version.sdk)
 echo 'export ANDROID_API_LEVEL=$(getprop ro.build.version.sdk)' >> ~/.bashrc
 source ~/.bashrc
 ```
@@ -44,84 +50,122 @@ source ~/.bashrc
 git clone https://github.com/nousresearch/hermes-agent.git ~/hermes-agent
 ```
 
-## 第四步：安装核心依赖
+## 第四步：安装预编译 Rust wheel + 兼容桩
 
-**不要使用项目自带的 `install.sh`**，它是为标准 Linux/macOS 设计的，会尝试 `sudo apt-get` 等操作。
-
-### 方案 A：使用预编译 wheel（推荐，快速）
+### 方案 A：一键安装脚本（推荐）
 
 ```bash
-cd ~/hermes-agent
-export ANDROID_API_LEVEL=$(getprop ro.build.version.sdk)
+curl -O https://raw.githubusercontent.com/hillerliao/termux-hermes-agent/main/install-termux.sh
+bash install-termux.sh
+```
 
-# 配置 Termux 预编译 wheel 源
+### 方案 B：手动分步安装
+
+```bash
+# 1. 安装 termux-pip 配置预编译源
 pip install termux-pip && tpip setup
 
-# 安装核心依赖（pip 会自动使用预编译 wheel）
-pip install -e .
-```
+# 2. 安装预编译 Rust wheel
+pip install cryptography --only-binary=cryptography
+pip install pydantic-core --only-binary=pydantic-core
 
-Termux 社区提供了预编译 wheel，覆盖了大部分 Rust/C 扩展包：
-- **TUR PyPI** (`termux-user-repository.github.io/pypi/`)：cryptography, pydantic-core, tiktoken, tokenizers 等
-- **nsyhykui 仓库** (`nsyhykui.github.io/python_wheels_for_termux/simple/`)：500+ 预编译包
-
-如果 `pip install -e .` 仍然失败（通常是 `jiter` 无法编译），跳到方案 B。
-
-### 方案 B：手动安装预编译 wheel + jiter 桩
-
-```bash
-# 1. 先从预编译源安装 Rust 扩展包
-pip install cryptography --index-url https://termux-user-repository.github.io/pypi/
-pip install pydantic-core --index-url https://termux-user-repository.github.io/pypi/
-
-# 2. 创建 jiter 兼容桩（jiter 无预编译 wheel，用纯 Python 替代）
-python3 -c "
-import site, os
-sp = site.getsitepackages()[0]
-with open(os.path.join(sp, 'jiter.py'), 'w') as f:
-    f.write('''import json
+# 3. 创建 jiter 兼容桩
+SP=$(python3 -c "import site; print(site.getsitepackages()[0])")
+cat > "${SP}/jiter.py" << 'EOF'
+import json
 from typing import Any, Optional, Union
-
 def from_json(data, *, allow_inf=True, cache=True, partial_mode=None):
     if isinstance(data, (bytes, bytearray)):
-        data = data.decode(\"utf-8\")
+        data = data.decode("utf-8")
     return json.loads(data)
-
 def to_json(obj, **kwargs):
     return json.dumps(obj, **kwargs)
-
 class JiterError(Exception):
     pass
-''')
-print(f'jiter stub created at {sp}/jiter.py')
-"
+EOF
 
-# 3. 安装 hermes-agent（跳过已安装的 Rust 包编译）
-pip install -e . --no-build-isolation
+# 注册 jiter 桩为已安装包 (让 pip 依赖解析通过)
+mkdir -p "${SP}/jiter-0.10.0.dist-info"
+cat > "${SP}/jiter-0.10.0.dist-info/METADATA" << 'EOF'
+Metadata-Version: 2.1
+Name: jiter
+Version: 0.10.0
+Summary: Fast iterable JSON parser (Termux stub)
+Requires-Python: >=3.8
+EOF
+printf 'jiter.py,,\njiter-0.10.0.dist-info/METADATA,,\njiter-0.10.0.dist-info/RECORD,,\n' > "${SP}/jiter-0.10.0.dist-info/RECORD"
+echo "termux-stub" > "${SP}/jiter-0.10.0.dist-info/INSTALLER"
+echo "jiter" > "${SP}/jiter-0.10.0.dist-info/top_level.txt"
+
+# 4. 创建 rpds-py 兼容桩
+mkdir -p "${SP}/rpds"
+cat > "${SP}/rpds/__init__.py" << 'EOF'
+class HashTrieMap(dict):
+    def insert(self, key, value):
+        new = HashTrieMap(self)
+        new[key] = value
+        return new
+    def discard(self, key):
+        new = HashTrieMap(self)
+        new.pop(key, None)
+        return new
+class HashTrieSet(frozenset):
+    def insert(self, value):
+        return HashTrieSet(self | {value})
+    def discard(self, value):
+        return HashTrieSet(self - {value})
+class List(list):
+    pass
+EOF
+
+# 注册 rpds-py 桩
+mkdir -p "${SP}/rpds_py-0.22.0.dist-info"
+cat > "${SP}/rpds_py-0.22.0.dist-info/METADATA" << 'EOF'
+Metadata-Version: 2.1
+Name: rpds-py
+Version: 0.22.0
+Summary: Python bindings to Rust rpds crate (Termux stub)
+Requires-Python: >=3.8
+EOF
+printf 'rpds/__init__.py,,\nrpds_py-0.22.0.dist-info/METADATA,,\nrpds_py-0.22.0.dist-info/RECORD,,\n' > "${SP}/rpds_py-0.22.0.dist-info/RECORD"
+echo "termux-stub" > "${SP}/rpds_py-0.22.0.dist-info/INSTALLER"
+echo "rpds" > "${SP}/rpds_py-0.22.0.dist-info/top_level.txt"
+
+# 5. 验证桩
+python3 -c "import jiter; print(jiter.from_json('{\"ok\":true}'))"
+python3 -c "from rpds import HashTrieMap; print(HashTrieMap())"
 ```
 
-### 方案 C：直接从源码编译（慢，约 10-20 分钟）
-
-如果以上方案都不行，可以尝试直接编译（需要确保 Rust 工具链正常）：
+## 第五步：安装 Hermes Agent
 
 ```bash
 cd ~/hermes-agent
-export ANDROID_API_LEVEL=$(getprop ro.build.version.sdk)
-pip install -e .
+
+# 用 --no-deps 安装，避免 pip 尝试编译 Rust 包
+pip install -e . --no-deps
+
+# 手动安装所有非 Rust 依赖
+PIP_OPTS="--only-binary=jiter --only-binary=rpds-py --only-binary=pydantic-core --only-binary=cryptography"
+pip install \
+    "openai>=2.21.0,<3" "anthropic>=0.39.0,<1" \
+    "python-dotenv>=1.2.1,<2" "fire>=0.7.1,<1" \
+    "httpx[socks]>=0.28.1,<1" "rich>=14.3.3,<15" \
+    "tenacity>=9.1.4,<10" "pyyaml>=6.0.2,<7" \
+    "requests>=2.33.0,<3" "jinja2>=3.1.5,<4" \
+    "pydantic>=2.12.5,<3" "prompt_toolkit>=3.0.52,<4" \
+    "exa-py>=2.9.0,<3" "firecrawl-py>=4.16.0,<5" \
+    "parallel-web>=0.4.2,<1" "fal-client>=0.13.1,<1" \
+    "edge-tts>=7.2.7,<8" "PyJWT[crypto]>=2.12.0,<3" \
+    $PIP_OPTS
 ```
 
-编译过程较慢，主要是 Rust 扩展（`jiter`, `pydantic-core`）和 C 扩展（`cryptography`, `MarkupSafe`, `pyyaml`）需要从源码编译。
+## 第六步：修复 hermes 入口脚本（如需要）
 
-## 第五步：修复 hermes 入口脚本
-
-**关键步骤！** 如果你之前用 proot-distro 安装过，`/data/data/com.termux/files/usr/bin/hermes` 可能被覆盖为一个包装脚本（转发到 Ubuntu venv），需要恢复为 Termux 原生入口。
-
-检查当前入口：
 ```bash
 cat $(which hermes)
 ```
 
-**如果是 proot 包装脚本**（包含 `proot-distro login ubuntu`），需要覆盖为：
+如果是 proot 包装脚本，覆盖为：
 
 ```bash
 cat > $(which hermes) << 'EOF'
@@ -135,106 +179,53 @@ EOF
 chmod +x $(which hermes)
 ```
 
-**如果是正常的 Python 入口**（已经是 `from hermes_cli.main import main`），则无需修改。
-
-## 第六步：按需安装可选依赖
+## 第七步：安装可选依赖
 
 ```bash
-# 消息平台集成（Telegram/Discord）
-pip install -e ".[messaging]"
-
-# 定时任务
-pip install -e ".[cron]"
-
-# MCP 协议
-pip install -e ".[mcp]"
-
-# Slack 集成
-pip install -e ".[slack]"
-
-# 钉钉/飞书
-pip install -e ".[dingtalk]"
-pip install -e ".[feishu]"
+# 国内用户常用
+pip install -e ".[cron]" $PIP_OPTS
+pip install -e ".[mcp]" $PIP_OPTS
+pip install -e ".[pty]" $PIP_OPTS
+pip install -e ".[feishu]" $PIP_OPTS
+pip install -e ".[dingtalk]" $PIP_OPTS
 ```
 
-**不可用的可选组：**
-- ❌ `[voice]` — `faster-whisper` 依赖 `ctranslate2`（C++），`sounddevice` 依赖 PortAudio，在 Termux ARM 上极难构建
-- ❌ `[rl]` — 重量级服务端依赖
-
-## 第七步：初始化配置
-
-```bash
-hermes setup
-```
-
-交互式配置向导会引导你设置：
-1. LLM Provider（OpenAI / OpenRouter / Anthropic / 自托管）
-2. API Key
-3. 工具启用
-4. 消息平台
-5. 记忆和技能设置
-
-或者手动创建配置：
-```bash
-mkdir -p ~/.hermes
-cp ~/hermes-agent/.env.example ~/.hermes/.env
-# 编辑 .env 填入你的 API Key
-nano ~/.hermes/.env
-```
+**不可用**: `[voice]`（C++ 依赖）、`[rl]`（重量级服务端）
 
 ## 第八步：验证安装
 
 ```bash
-# 版本检查
 hermes --version
-
-# 完整诊断
 hermes doctor
 ```
 
 预期输出：
 ```
-Hermes Agent v0.8.0 (2026.4.8)
+Hermes Agent v0.10.0 (2026.4.16)
 Project: /data/data/com.termux/files/home/hermes-agent
-Python: 3.13.12
-OpenAI SDK: 2.31.0
-```
-
-## 第九步：开始使用
-
-```bash
-hermes          # 启动交互式聊天
-hermes chat     # 同上
-hermes status   # 查看组件状态
+Python: 3.13.13
+OpenAI SDK: 2.32.0
 ```
 
 ---
 
 ## 踩坑记录
 
-### 0. Rust 扩展编译失败（jiter / pydantic-core / cryptography）
+### 0. Rust 扩展编译失败（jiter / pydantic-core / rpds-py / cryptography）
 
 **错误**: `crate 'std' required to be available in rlib format, but was not found in this form`
 
-**原因**: Termux 的 Rust 工具链缺少标准库 rlib 文件，导致 maturin 构建的所有 Rust 扩展包都编译失败。这是 Hermes Agent v0.10.0 最常见的安装阻断问题。
+**原因**: Termux 的 Rust 工具链缺少标准库 rlib 文件，maturin 构建的所有 Rust 扩展包都编译失败。
 
-**受影响包**:
-| 包名 | 类型 | 预编译 wheel |
-|------|------|-------------|
-| `cryptography` | Rust (maturin) | ✅ TUR 有 |
-| `pydantic-core` | Rust (maturin) | ✅ TUR 有 |
-| `jiter` | Rust (maturin) | ❌ 无预编译 |
+**解决方案**:
+1. `pydantic-core` / `cryptography` → tpypi 预编译 wheel
+2. `jiter` / `rpds-py` → 纯 Python 兼容桩 + dist-info 注册
+3. 安装时用 `--no-deps` 避免 pip 自动编译 Rust 包
+4. 用 `--only-binary=jiter --only-binary=rpds-py` 让 pip 不尝试从源码编译
 
-**解决方案**（按优先级）:
-1. 使用预编译 wheel 源（推荐）：`tpip setup` 或手动配置 `extra-index-url`
-2. 对 `jiter` 创建纯 Python 兼容桩（见第四步方案 B）
-3. 降级到不需要 Rust 的旧版依赖（不推荐，会丢失功能）
+### 1. ANDROID_API_LEVEL 未设置
 
-### 1. `ANDROID_API_LEVEL` 未设置
-
-**错误**: `Failed to determine Android API level. Please set the ANDROID_API_LEVEL environment variable.`
-
-**原因**: `jiter`（anthropic SDK 的依赖）使用 maturin 构建 Rust 扩展，maturin 检测到 Android 环境但无法自动获取 API Level。
+**错误**: `Failed to determine Android API level`
 
 **解决**: `export ANDROID_API_LEVEL=$(getprop ro.build.version.sdk)`
 
@@ -242,20 +233,30 @@ hermes status   # 查看组件状态
 
 **错误**: `ModuleNotFoundError: No module named 'rich.console'`
 
-**原因**: 之前用 proot-distro Ubuntu 安装时，入口脚本被改为转发到 Ubuntu venv，但 venv 里没装依赖。
-
 **解决**: 将 `/data/data/com.termux/files/usr/bin/hermes` 恢复为 Termux 原生 Python 入口。
 
 ### 3. 不要使用官方 install.sh
 
-**原因**: 脚本使用 `sudo apt-get` 安装系统包，Termux 用的是 `pkg`，且没有 sudo。直接 `pip install -e .` 即可。
+**原因**: 脚本使用 `sudo apt-get` 安装系统包，Termux 用的是 `pkg`，且没有 sudo。
+
+### 4. 预编译源兼容性
+
+| 源 | Python 版本 | 架构 | 可用性 |
+|----|-----------|------|--------|
+| **tpypi (loamfy)** | cp313 | android_24_arm64 | ✅ 可用 |
+| TUR (termux-user-repository) | cp311 | linux_aarch64 | ❌ Python 版本不匹配 |
+| nsyhykui | cp313 | android_24_arm64 | ❌ wheel 文件 404 |
+
+### 5. jiter/rpds-py 桩必须注册 dist-info
+
+如果不注册 dist-info，pip 的依赖解析器会认为这些包未安装，导致 `ResolutionImpossible` 错误。注册方法是在 `site-packages/` 下创建 `jiter-0.10.0.dist-info/` 和 `rpds_py-0.22.0.dist-info/` 目录。
 
 ---
 
 ## 性能说明
 
 - **LLM API 调用**：流畅，计算在云端
-- **本地处理**（技能执行、文件操作等）：可用但较慢
+- **本地处理**：可用但较慢（jiter/rpds 使用纯 Python 桩，性能低于 Rust 原生版）
 - **内存占用**：约 200-500MB（含 Python 运行时）
 - **建议**：手机至少 4GB RAM，开启 Swap 更稳
 
