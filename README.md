@@ -64,6 +64,7 @@ hermes
 
 ## 已知限制
 
+- **Rust 扩展编译可能失败** — `jiter`/`pydantic-core`/`cryptography` 在部分设备上编译失败（缺少 Rust stdlib rlib），脚本已自动配置预编译 wheel 源和 jiter 兼容桩
 - **voice 功能不可用** — `faster-whisper` 依赖 C++ 库，ARM 上极难构建
 - **不要使用官方 install.sh** — 它需要 `sudo`，Termux 没有
 - **确保 ANDROID_API_LEVEL 已设置** — 否则 maturin/Rust 构建会报错

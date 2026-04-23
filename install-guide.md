@@ -1,14 +1,14 @@
 # Hermes Agent 在 Termux 上的安装指南
 
 > 经过真机实测验证（Android 12, aarch64, Termux）
-> 日期：2026-04-09
+> 日期：2026-04-23（更新 Rust 编译问题解决方案）
 
 ## 环境信息
 
 - **设备**: Android 手机 (aarch64)
 - **系统**: Termux (非 proot-distro Ubuntu)
 - **Android API Level**: 35 (Android 12)
-- **Hermes Agent 版本**: v0.8.0
+- **Hermes Agent 版本**: v0.10.0
 
 ---
 
@@ -48,22 +48,69 @@ git clone https://github.com/nousresearch/hermes-agent.git ~/hermes-agent
 
 **不要使用项目自带的 `install.sh`**，它是为标准 Linux/macOS 设计的，会尝试 `sudo apt-get` 等操作。
 
+### 方案 A：使用预编译 wheel（推荐，快速）
+
+```bash
+cd ~/hermes-agent
+export ANDROID_API_LEVEL=$(getprop ro.build.version.sdk)
+
+# 配置 Termux 预编译 wheel 源
+pip install termux-pip && tpip setup
+
+# 安装核心依赖（pip 会自动使用预编译 wheel）
+pip install -e .
+```
+
+Termux 社区提供了预编译 wheel，覆盖了大部分 Rust/C 扩展包：
+- **TUR PyPI** (`termux-user-repository.github.io/pypi/`)：cryptography, pydantic-core, tiktoken, tokenizers 等
+- **nsyhykui 仓库** (`nsyhykui.github.io/python_wheels_for_termux/simple/`)：500+ 预编译包
+
+如果 `pip install -e .` 仍然失败（通常是 `jiter` 无法编译），跳到方案 B。
+
+### 方案 B：手动安装预编译 wheel + jiter 桩
+
+```bash
+# 1. 先从预编译源安装 Rust 扩展包
+pip install cryptography --index-url https://termux-user-repository.github.io/pypi/
+pip install pydantic-core --index-url https://termux-user-repository.github.io/pypi/
+
+# 2. 创建 jiter 兼容桩（jiter 无预编译 wheel，用纯 Python 替代）
+python3 -c "
+import site, os
+sp = site.getsitepackages()[0]
+with open(os.path.join(sp, 'jiter.py'), 'w') as f:
+    f.write('''import json
+from typing import Any, Optional, Union
+
+def from_json(data, *, allow_inf=True, cache=True, partial_mode=None):
+    if isinstance(data, (bytes, bytearray)):
+        data = data.decode(\"utf-8\")
+    return json.loads(data)
+
+def to_json(obj, **kwargs):
+    return json.dumps(obj, **kwargs)
+
+class JiterError(Exception):
+    pass
+''')
+print(f'jiter stub created at {sp}/jiter.py')
+"
+
+# 3. 安装 hermes-agent（跳过已安装的 Rust 包编译）
+pip install -e . --no-build-isolation
+```
+
+### 方案 C：直接从源码编译（慢，约 10-20 分钟）
+
+如果以上方案都不行，可以尝试直接编译（需要确保 Rust 工具链正常）：
+
 ```bash
 cd ~/hermes-agent
 export ANDROID_API_LEVEL=$(getprop ro.build.version.sdk)
 pip install -e .
 ```
 
-这会安装所有核心依赖：
-- `openai`, `anthropic` — LLM SDK
-- `rich`, `prompt_toolkit` — 终端 UI
-- `httpx`, `requests`, `aiohttp` — 网络请求
-- `pydantic`, `pyyaml`, `jinja2` — 数据处理
-- `firecrawl-py`, `exa-py`, `fal-client` — 工具集成
-- `edge-tts` — 免费语音合成
-- `PyJWT[crypto]` — JWT 认证（含 cryptography 编译）
-
-编译过程较慢（约 10-20 分钟），主要是 Rust 扩展（`jiter`, `pydantic-core`）和 C 扩展（`cryptography`, `MarkupSafe`, `pyyaml`）需要从源码编译。
+编译过程较慢，主要是 Rust 扩展（`jiter`, `pydantic-core`）和 C 扩展（`cryptography`, `MarkupSafe`, `pyyaml`）需要从源码编译。
 
 ## 第五步：修复 hermes 入口脚本
 
@@ -164,6 +211,24 @@ hermes status   # 查看组件状态
 ---
 
 ## 踩坑记录
+
+### 0. Rust 扩展编译失败（jiter / pydantic-core / cryptography）
+
+**错误**: `crate 'std' required to be available in rlib format, but was not found in this form`
+
+**原因**: Termux 的 Rust 工具链缺少标准库 rlib 文件，导致 maturin 构建的所有 Rust 扩展包都编译失败。这是 Hermes Agent v0.10.0 最常见的安装阻断问题。
+
+**受影响包**:
+| 包名 | 类型 | 预编译 wheel |
+|------|------|-------------|
+| `cryptography` | Rust (maturin) | ✅ TUR 有 |
+| `pydantic-core` | Rust (maturin) | ✅ TUR 有 |
+| `jiter` | Rust (maturin) | ❌ 无预编译 |
+
+**解决方案**（按优先级）:
+1. 使用预编译 wheel 源（推荐）：`tpip setup` 或手动配置 `extra-index-url`
+2. 对 `jiter` 创建纯 Python 兼容桩（见第四步方案 B）
+3. 降级到不需要 Rust 的旧版依赖（不推荐，会丢失功能）
 
 ### 1. `ANDROID_API_LEVEL` 未设置
 
